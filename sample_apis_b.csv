@@ -1,0 +1,5 @@
+api_name,method,api_url,request_header,request_body
+get_user,GET,https://jsonplaceholder.typicode.com/users/1,"{"Accept":"application/json"}",
+create_post,POST,https://jsonplaceholder.typicode.com/posts,"{"Content-Type":"application/json"}","{""title"":""foo"",""body"":""bar"",""userId"":1}"
+update_post,PUT,https://jsonplaceholder.typicode.com/posts/1,"{"Content-Type":"application/json"}","{""id"":1,""title"":""foo updated"",""body"":""bar changed"",""userId"":1}"
+delete_post,DELETE,https://jsonplaceholder.typicode.com/posts/1,"{"Accept":"application/json"}",
