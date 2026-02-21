@@ -14,9 +14,9 @@ Each CSV should contain one row per API test and include:
 - Loads CSV A and CSV B.
 - Matches records using API name/key.
 - Calls APIs from both sides using each row's method, URL, headers, and body.
-- Captures response header and response body for both sides.
+- Captures response header, response body, start time (UTC), end time (UTC), and response time (ms) for both sides.
 - Compares response body only.
-- Writes a report CSV with test result and failure reason.
+- Writes a report CSV with test result and failure reason/details.
 
 ## Request parsing and formatting behavior
 - Request header parsing is tolerant of common CSV/JSON formatting issues:
@@ -69,10 +69,15 @@ Request header/body columns are optional but recommended.
 - `request_body_a`, `request_body_b`
 - `response_header_a`, `response_header_b`
 - `response_body_a`, `response_body_b`
+- `start_time_utc_a`, `end_time_utc_a`
+- `start_time_utc_b`, `end_time_utc_b`
+- `response_time_ms_a`, `response_time_ms_b`
+- `response_time_diff_ms` (absolute difference between A and B in milliseconds)
 - `status_result` (`success` or `fail`)
 - `description`
 
 ## Notes
 - `status_result=success` only when response bodies are equal after JSON normalization.
+- For response mismatches, `description` includes what is different (missing keys, list length changes, and value differences with JSON path).
 - Invalid request-header JSON or HTTP request failures are written as `fail` with reason in `description`.
 - Output file name is date-suffixed automatically (example: `comparison_report_20260221.csv`).
