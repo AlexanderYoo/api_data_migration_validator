@@ -12,7 +12,8 @@ import csv
 import json
 import re
 import sys
-from datetime import datetime
+from time import perf_counter
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -39,6 +40,9 @@ class HttpResult:
     request_body: Optional[str]
     response_header: Optional[str]
     response_body: Optional[str]
+    start_time_utc: str
+    end_time_utc: str
+    response_time_ms: Optional[float]
     error: Optional[str]
 
 
@@ -60,6 +64,13 @@ class ComparisonRow:
     response_header_b: Optional[str]
     response_body_a: Optional[str]
     response_body_b: Optional[str]
+    start_time_utc_a: Optional[str]
+    end_time_utc_a: Optional[str]
+    start_time_utc_b: Optional[str]
+    end_time_utc_b: Optional[str]
+    response_time_ms_a: Optional[float]
+    response_time_ms_b: Optional[float]
+    response_time_diff_ms: Optional[float]
     status_result: str
     description: str
 
@@ -331,6 +342,8 @@ def call_api(
         )
 
     body = parse_body_text(request_body_text)
+    started_at = datetime.now(timezone.utc).isoformat()
+    started = perf_counter()
     try:
         # Send structured bodies via `json` and plain content via `data`.
         response = session.request(
@@ -341,19 +354,29 @@ def call_api(
             data=None if isinstance(body, (dict, list)) else body,
             timeout=timeout_seconds,
         )
+        elapsed_ms = (perf_counter() - started) * 1000
+        ended_at = datetime.now(timezone.utc).isoformat()
         return HttpResult(
             request_header=as_request_text(headers),
             request_body=as_request_text(body),
             response_header=as_text(dict(response.headers)),
             response_body=response.text,
+            start_time_utc=started_at,
+            end_time_utc=ended_at,
+            response_time_ms=elapsed_ms,
             error=None,
         )
     except requests.RequestException as exc:
+        elapsed_ms = (perf_counter() - started) * 1000
+        ended_at = datetime.now(timezone.utc).isoformat()
         return HttpResult(
             request_header=as_request_text(headers),
             request_body=as_request_text(body),
             response_header=None,
             response_body=None,
+            start_time_utc=started_at,
+            end_time_utc=ended_at,
+            response_time_ms=elapsed_ms,
             error=str(exc),
         )
 
@@ -362,6 +385,63 @@ def compare_response_bodies(left: Optional[str], right: Optional[str]) -> bool:
     """Compare response bodies after canonical normalization."""
 
     return canonicalize(left) == canonicalize(right)
+
+
+def _short_value(value: Any, max_len: int = 120) -> str:
+    """Render a compact value preview for mismatch descriptions."""
+
+    text = canonicalize(value)
+    if len(text) <= max_len:
+        return text
+    return f"{text[: max_len - 3]}..."
+
+
+def describe_response_mismatch(left: Optional[str], right: Optional[str], max_items: int = 5) -> str:
+    """Build a concise reason for body mismatch (key/index/value differences)."""
+
+    left_value = normalize_value(left)
+    right_value = normalize_value(right)
+    details: List[str] = []
+
+    def add_detail(message: str) -> None:
+        if len(details) < max_items:
+            details.append(message)
+
+    def walk(path: str, a: Any, b: Any) -> None:
+        if len(details) >= max_items:
+            return
+
+        if isinstance(a, dict) and isinstance(b, dict):
+            keys_a = set(a.keys())
+            keys_b = set(b.keys())
+
+            for key in sorted(keys_a - keys_b):
+                add_detail(f"{path}.{key} missing in B")
+            for key in sorted(keys_b - keys_a):
+                add_detail(f"{path}.{key} missing in A")
+
+            for key in sorted(keys_a & keys_b):
+                walk(f"{path}.{key}", a[key], b[key])
+            return
+
+        if isinstance(a, list) and isinstance(b, list):
+            if len(a) != len(b):
+                add_detail(f"{path} length A={len(a)} B={len(b)}")
+            for i, (item_a, item_b) in enumerate(zip(a, b)):
+                walk(f"{path}[{i}]", item_a, item_b)
+            return
+
+        if canonicalize(a) != canonicalize(b):
+            add_detail(f"{path} A={_short_value(a)} B={_short_value(b)}")
+
+    walk("$", left_value, right_value)
+    if not details:
+        details = [f"$ A={_short_value(left_value)} B={_short_value(right_value)}"]
+
+    suffix = ""
+    if len(details) >= max_items:
+        suffix = " (showing first differences)"
+    return f"Response body mismatch: {'; '.join(details)}{suffix}"
 
 
 def compare_records(
@@ -396,6 +476,13 @@ def compare_records(
                     response_header_b=None,
                     response_body_a=None,
                     response_body_b=None,
+                    start_time_utc_a=None,
+                    end_time_utc_a=None,
+                    start_time_utc_b=None,
+                    end_time_utc_b=None,
+                    response_time_ms_a=None,
+                    response_time_ms_b=None,
+                    response_time_diff_ms=None,
                     status_result="fail",
                     description="Key exists only in CSV B",
                 )
@@ -419,6 +506,13 @@ def compare_records(
                     response_header_b=None,
                     response_body_a=None,
                     response_body_b=None,
+                    start_time_utc_a=None,
+                    end_time_utc_a=None,
+                    start_time_utc_b=None,
+                    end_time_utc_b=None,
+                    response_time_ms_a=None,
+                    response_time_ms_b=None,
+                    response_time_diff_ms=None,
                     status_result="fail",
                     description="Key exists only in CSV A",
                 )
@@ -427,6 +521,9 @@ def compare_records(
 
         result_a = call_api(session, rec_a, timeout_seconds)
         result_b = call_api(session, rec_b, timeout_seconds)
+        time_diff_ms: Optional[float] = None
+        if result_a.response_time_ms is not None and result_b.response_time_ms is not None:
+            time_diff_ms = abs(result_a.response_time_ms - result_b.response_time_ms)
 
         if result_a.error or result_b.error:
             description = f"A error: {result_a.error or 'none'} | B error: {result_b.error or 'none'}"
@@ -446,6 +543,13 @@ def compare_records(
                     response_header_b=result_b.response_header,
                     response_body_a=result_a.response_body,
                     response_body_b=result_b.response_body,
+                    start_time_utc_a=result_a.start_time_utc,
+                    end_time_utc_a=result_a.end_time_utc,
+                    start_time_utc_b=result_b.start_time_utc,
+                    end_time_utc_b=result_b.end_time_utc,
+                    response_time_ms_a=result_a.response_time_ms,
+                    response_time_ms_b=result_b.response_time_ms,
+                    response_time_diff_ms=time_diff_ms,
                     status_result="fail",
                     description=description,
                 )
@@ -454,7 +558,11 @@ def compare_records(
 
         same_body = compare_response_bodies(result_a.response_body, result_b.response_body)
         status = "success" if same_body else "fail"
-        description = "Response body match" if same_body else "Response body mismatch"
+        description = (
+            "Response body match"
+            if same_body
+            else describe_response_mismatch(result_a.response_body, result_b.response_body)
+        )
 
         rows.append(
             ComparisonRow(
@@ -472,6 +580,13 @@ def compare_records(
                 response_header_b=result_b.response_header,
                 response_body_a=result_a.response_body,
                 response_body_b=result_b.response_body,
+                start_time_utc_a=result_a.start_time_utc,
+                end_time_utc_a=result_a.end_time_utc,
+                start_time_utc_b=result_b.start_time_utc,
+                end_time_utc_b=result_b.end_time_utc,
+                response_time_ms_a=result_a.response_time_ms,
+                response_time_ms_b=result_b.response_time_ms,
+                response_time_diff_ms=time_diff_ms,
                 status_result=status,
                 description=description,
             )
@@ -501,6 +616,13 @@ def write_report(rows: List[ComparisonRow], path: str) -> None:
                 "response_header_b",
                 "response_body_a",
                 "response_body_b",
+                "start_time_utc_a",
+                "end_time_utc_a",
+                "start_time_utc_b",
+                "end_time_utc_b",
+                "response_time_ms_a",
+                "response_time_ms_b",
+                "response_time_diff_ms",
                 "status_result",
                 "description",
             ]
@@ -522,6 +644,13 @@ def write_report(rows: List[ComparisonRow], path: str) -> None:
                     item.response_header_b,
                     item.response_body_a,
                     item.response_body_b,
+                    item.start_time_utc_a,
+                    item.end_time_utc_a,
+                    item.start_time_utc_b,
+                    item.end_time_utc_b,
+                    item.response_time_ms_a,
+                    item.response_time_ms_b,
+                    item.response_time_diff_ms,
                     item.status_result,
                     item.description,
                 ]
